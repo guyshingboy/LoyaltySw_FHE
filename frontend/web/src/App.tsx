@@ -5,15 +5,18 @@ import { getContractReadOnly, getContractWithSigner } from "./components/useCont
 import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
+import { ethers } from 'ethers';
 
-interface SwapData {
+interface LoyaltySwapData {
   id: string;
   name: string;
   encryptedPoints: string;
-  publicRate: number;
-  description: string;
+  exchangeRate: number;
+  brand: string;
   timestamp: number;
   creator: string;
+  publicValue1: number;
+  publicValue2: number;
   isVerified?: boolean;
   decryptedValue?: number;
 }
@@ -21,7 +24,7 @@ interface SwapData {
 const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const [loading, setLoading] = useState(true);
-  const [swaps, setSwaps] = useState<SwapData[]>([]);
+  const [swaps, setSwaps] = useState<LoyaltySwapData[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creatingSwap, setCreatingSwap] = useState(false);
@@ -30,13 +33,20 @@ const App: React.FC = () => {
     status: "pending", 
     message: "" 
   });
-  const [newSwapData, setNewSwapData] = useState({ name: "", points: "", rate: "", description: "" });
-  const [selectedSwap, setSelectedSwap] = useState<SwapData | null>(null);
+  const [newSwapData, setNewSwapData] = useState({ 
+    name: "", 
+    points: "", 
+    exchangeRate: "",
+    brand: ""
+  });
+  const [selectedSwap, setSelectedSwap] = useState<LoyaltySwapData | null>(null);
+  const [decryptedPoints, setDecryptedPoints] = useState<number | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [contractAddress, setContractAddress] = useState("");
   const [fhevmInitializing, setFhevmInitializing] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
-  const [activeFilter, setActiveFilter] = useState("all");
+  const [filterBrand, setFilterBrand] = useState("all");
+  const [userHistory, setUserHistory] = useState<any[]>([]);
 
   const { status, initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
@@ -44,7 +54,8 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
+      if (!isConnected) return;
+      if (isInitialized || fhevmInitializing) return;
       
       try {
         setFhevmInitializing(true);
@@ -94,7 +105,7 @@ const App: React.FC = () => {
       if (!contract) return;
       
       const businessIds = await contract.getAllBusinessIds();
-      const swapsList: SwapData[] = [];
+      const swapsList: LoyaltySwapData[] = [];
       
       for (const businessId of businessIds) {
         try {
@@ -103,10 +114,12 @@ const App: React.FC = () => {
             id: businessId,
             name: businessData.name,
             encryptedPoints: businessId,
-            publicRate: Number(businessData.publicValue1) || 0,
-            description: businessData.description,
+            exchangeRate: Number(businessData.publicValue1) || 0,
+            brand: businessData.description,
             timestamp: Number(businessData.timestamp),
             creator: businessData.creator,
+            publicValue1: Number(businessData.publicValue1) || 0,
+            publicValue2: Number(businessData.publicValue2) || 0,
             isVerified: businessData.isVerified,
             decryptedValue: Number(businessData.decryptedValue) || 0
           });
@@ -132,7 +145,7 @@ const App: React.FC = () => {
     }
     
     setCreatingSwap(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Creating loyalty swap with FHE..." });
+    setTransactionStatus({ visible: true, status: "pending", message: "Creating loyalty swap with FHE encryption..." });
     
     try {
       const contract = await getContractWithSigner();
@@ -148,26 +161,33 @@ const App: React.FC = () => {
         newSwapData.name,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        parseInt(newSwapData.rate) || 0,
+        parseInt(newSwapData.exchangeRate) || 0,
         0,
-        newSwapData.description
+        newSwapData.brand
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
       await tx.wait();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Swap created successfully!" });
+      setUserHistory(prev => [...prev, {
+        type: 'create',
+        id: businessId,
+        name: newSwapData.name,
+        timestamp: Date.now()
+      }]);
+      
+      setTransactionStatus({ visible: true, status: "success", message: "Loyalty swap created successfully!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
       
       await loadData();
       setShowCreateModal(false);
-      setNewSwapData({ name: "", points: "", rate: "", description: "" });
+      setNewSwapData({ name: "", points: "", exchangeRate: "", brand: "" });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
-        ? "Transaction rejected" 
-        : "Creation failed: " + (e.message || "Unknown error");
+        ? "Transaction rejected by user" 
+        : "Submission failed: " + (e.message || "Unknown error");
       setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
@@ -175,7 +195,7 @@ const App: React.FC = () => {
     }
   };
 
-  const decryptData = async (businessId: string): Promise<number | null> => {
+  const decryptPoints = async (businessId: string): Promise<number | null> => {
     if (!isConnected || !address) { 
       setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
@@ -190,8 +210,16 @@ const App: React.FC = () => {
       const businessData = await contractRead.getBusinessData(businessId);
       if (businessData.isVerified) {
         const storedValue = Number(businessData.decryptedValue) || 0;
-        setTransactionStatus({ visible: true, status: "success", message: "Data already verified" });
-        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+        
+        setTransactionStatus({ 
+          visible: true, 
+          status: "success", 
+          message: "Points already verified on-chain" 
+        });
+        setTimeout(() => {
+          setTransactionStatus({ visible: false, status: "pending", message: "" });
+        }, 2000);
+        
         return storedValue;
       }
       
@@ -207,12 +235,19 @@ const App: React.FC = () => {
           contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption on-chain..." });
       
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
-      await loadData();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Data decrypted successfully!" });
+      await loadData();
+      setUserHistory(prev => [...prev, {
+        type: 'decrypt',
+        id: businessId,
+        points: Number(clearValue),
+        timestamp: Date.now()
+      }]);
+      
+      setTransactionStatus({ visible: true, status: "success", message: "Points decrypted and verified successfully!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
@@ -221,13 +256,24 @@ const App: React.FC = () => {
       
     } catch (e: any) { 
       if (e.message?.includes("Data already verified")) {
-        setTransactionStatus({ visible: true, status: "success", message: "Data is already verified" });
-        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+        setTransactionStatus({ 
+          visible: true, 
+          status: "success", 
+          message: "Points are already verified on-chain" 
+        });
+        setTimeout(() => {
+          setTransactionStatus({ visible: false, status: "pending", message: "" });
+        }, 2000);
+        
         await loadData();
         return null;
       }
       
-      setTransactionStatus({ status: "error", message: "Decryption failed: " + (e.message || "Unknown error"), visible: true });
+      setTransactionStatus({ 
+        visible: true, 
+        status: "error", 
+        message: "Decryption failed: " + (e.message || "Unknown error") 
+      });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     } finally { 
@@ -235,52 +281,75 @@ const App: React.FC = () => {
     }
   };
 
-  const checkAvailability = async () => {
+  const testIsAvailable = async () => {
     try {
       const contract = await getContractReadOnly();
       if (!contract) return;
       
-      const isAvailable = await contract.isAvailable();
-      setTransactionStatus({ visible: true, status: "success", message: "Contract is available!" });
+      const result = await contract.isAvailable();
+      setTransactionStatus({ 
+        visible: true, 
+        status: "success", 
+        message: "Contract is available and working!" 
+      });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
     } catch (e) {
-      setTransactionStatus({ visible: true, status: "error", message: "Availability check failed" });
+      setTransactionStatus({ visible: true, status: "error", message: "Contract test failed" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
 
   const filteredSwaps = swaps.filter(swap => {
     const matchesSearch = swap.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         swap.description.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesFilter = activeFilter === "all" || 
-                         (activeFilter === "verified" && swap.isVerified) ||
-                         (activeFilter === "unverified" && !swap.isVerified);
-    return matchesSearch && matchesFilter;
+                         swap.brand.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesBrand = filterBrand === "all" || swap.brand === filterBrand;
+    return matchesSearch && matchesBrand;
   });
 
+  const brands = Array.from(new Set(swaps.map(swap => swap.brand)));
+
   const stats = {
-    total: swaps.length,
-    verified: swaps.filter(s => s.isVerified).length,
-    totalPoints: swaps.reduce((sum, s) => sum + (s.publicRate || 0), 0),
-    recent: swaps.filter(s => Date.now()/1000 - s.timestamp < 86400).length
+    totalSwaps: swaps.length,
+    verifiedSwaps: swaps.filter(s => s.isVerified).length,
+    totalPoints: swaps.reduce((sum, s) => sum + (s.decryptedValue || 0), 0),
+    activeBrands: brands.length
   };
 
   if (!isConnected) {
     return (
       <div className="app-container">
         <header className="app-header">
-          <div className="logo-section">
-            <h1>🎁 LoyaltySwap FHE</h1>
-            <p>積分隱私互換 · Encrypted Points Exchange</p>
+          <div className="logo">
+            <h1>Confidential Loyalty Swap 🔐</h1>
+            <p>積分隱私互換 - FHE Protected</p>
           </div>
-          <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          <div className="header-actions">
+            <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
+          </div>
         </header>
         
         <div className="connection-prompt">
-          <div className="prompt-content">
-            <div className="prompt-icon">🔐</div>
-            <h2>Connect Wallet to Start</h2>
-            <p>Connect your wallet to access encrypted loyalty point swaps with Zama FHE technology</p>
+          <div className="connection-content">
+            <div className="connection-icon">🔒</div>
+            <h2>Connect Wallet to Start Private Point Swaps</h2>
+            <p>Securely exchange loyalty points between brands using Fully Homomorphic Encryption</p>
+            <div className="feature-grid">
+              <div className="feature-card">
+                <div className="feature-icon">🔄</div>
+                <h3>Private Swaps</h3>
+                <p>Brands never see competitor's point values</p>
+              </div>
+              <div className="feature-card">
+                <div className="feature-icon">🔐</div>
+                <h3>FHE Encryption</h3>
+                <p>Points encrypted with Zama FHE technology</p>
+              </div>
+              <div className="feature-card">
+                <div className="feature-icon">💫</div>
+                <h3>Secure Exchange</h3>
+                <p>Homomorphic computation protects privacy</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -291,15 +360,16 @@ const App: React.FC = () => {
     return (
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
-        <p>Initializing FHE System...</p>
+        <p>Initializing FHE Encryption System...</p>
+        <p className="loading-note">Securing your loyalty points with homomorphic encryption</p>
       </div>
     );
   }
 
   if (loading) return (
     <div className="loading-screen">
-      <div className="fhe-sp-rotate"></div>
-      <p>Loading encrypted swaps...</p>
+      <div className="fhe-spinner"></div>
+      <p>Loading confidential swap system...</p>
     </div>
   );
 
@@ -307,13 +377,20 @@ const App: React.FC = () => {
     <div className="app-container">
       <header className="app-header">
         <div className="logo-section">
-          <h1>🎁 LoyaltySwap FHE</h1>
-          <p>積分隱私互換 · Privacy-Preserving Points</p>
+          <h1>Confidential Loyalty Swap</h1>
+          <p>積分隱私互換 • FHE Protected Exchange</p>
         </div>
         
         <div className="header-controls">
-          <button onClick={checkAvailability} className="avail-btn">Check Availability</button>
-          <button onClick={() => setShowCreateModal(true)} className="create-btn">+ New Swap</button>
+          <button onClick={testIsAvailable} className="test-btn">
+            Test Contract
+          </button>
+          <button 
+            onClick={() => setShowCreateModal(true)} 
+            className="create-btn"
+          >
+            + New Swap
+          </button>
           <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
         </div>
       </header>
@@ -321,83 +398,176 @@ const App: React.FC = () => {
       <div className="main-content">
         <div className="stats-grid">
           <div className="stat-card">
-            <div className="stat-value">{stats.total}</div>
-            <div className="stat-label">Total Swaps</div>
+            <div className="stat-icon">🔄</div>
+            <div className="stat-content">
+              <h3>Total Swaps</h3>
+              <div className="stat-value">{stats.totalSwaps}</div>
+            </div>
           </div>
           <div className="stat-card">
-            <div className="stat-value">{stats.verified}</div>
-            <div className="stat-label">Verified</div>
+            <div className="stat-icon">🔐</div>
+            <div className="stat-content">
+              <h3>Verified Points</h3>
+              <div className="stat-value">{stats.verifiedSwaps}</div>
+            </div>
           </div>
           <div className="stat-card">
-            <div className="stat-value">{stats.totalPoints}</div>
-            <div className="stat-label">Total Points</div>
+            <div className="stat-icon">⭐</div>
+            <div className="stat-content">
+              <h3>Total Points</h3>
+              <div className="stat-value">{stats.totalPoints}</div>
+            </div>
           </div>
           <div className="stat-card">
-            <div className="stat-value">{stats.recent}</div>
-            <div className="stat-label">Today</div>
+            <div className="stat-icon">🏢</div>
+            <div className="stat-content">
+              <h3>Active Brands</h3>
+              <div className="stat-value">{stats.activeBrands}</div>
+            </div>
           </div>
         </div>
 
-        <div className="controls-section">
-          <div className="search-filter">
-            <input 
-              type="text" 
-              placeholder="Search swaps..." 
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="search-input"
-            />
-            <div className="filter-buttons">
-              <button 
-                className={activeFilter === "all" ? "active" : ""}
-                onClick={() => setActiveFilter("all")}
-              >All</button>
-              <button 
-                className={activeFilter === "verified" ? "active" : ""}
-                onClick={() => setActiveFilter("verified")}
-              >Verified</button>
-              <button 
-                className={activeFilter === "unverified" ? "active" : ""}
-                onClick={() => setActiveFilter("unverified")}
-              >Unverified</button>
-            </div>
-          </div>
-          <button onClick={loadData} disabled={isRefreshing} className="refresh-btn">
-            {isRefreshing ? "Refreshing..." : "Refresh"}
-          </button>
-        </div>
-
-        <div className="swaps-list">
-          {filteredSwaps.length === 0 ? (
-            <div className="empty-state">
-              <div className="empty-icon">🎁</div>
-              <p>No loyalty swaps found</p>
-              <button onClick={() => setShowCreateModal(true)} className="create-btn">Create First Swap</button>
-            </div>
-          ) : (
-            filteredSwaps.map((swap, index) => (
-              <div 
-                key={index} 
-                className={`swap-item ${swap.isVerified ? 'verified' : ''} ${selectedSwap?.id === swap.id ? 'selected' : ''}`}
-                onClick={() => setSelectedSwap(swap)}
-              >
-                <div className="swap-header">
-                  <h3>{swap.name}</h3>
-                  <span className={`status-badge ${swap.isVerified ? 'verified' : 'pending'}`}>
-                    {swap.isVerified ? '✅ Verified' : '🔒 Encrypted'}
-                  </span>
+        <div className="content-panels">
+          <div className="swap-panel">
+            <div className="panel-header">
+              <h2>Available Point Swaps</h2>
+              <div className="panel-controls">
+                <div className="search-box">
+                  <input 
+                    type="text" 
+                    placeholder="Search swaps..." 
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                  />
                 </div>
-                <p className="swap-desc">{swap.description}</p>
-                <div className="swap-meta">
-                  <span>Rate: {swap.publicRate}</span>
-                  <span>Created: {new Date(swap.timestamp * 1000).toLocaleDateString()}</span>
-                </div>
-                {swap.isVerified && swap.decryptedValue && (
-                  <div className="decrypted-value">Points: {swap.decryptedValue}</div>
-                )}
+                <select 
+                  value={filterBrand} 
+                  onChange={(e) => setFilterBrand(e.target.value)}
+                  className="brand-filter"
+                >
+                  <option value="all">All Brands</option>
+                  {brands.map(brand => (
+                    <option key={brand} value={brand}>{brand}</option>
+                  ))}
+                </select>
+                <button onClick={loadData} className="refresh-btn">
+                  Refresh
+                </button>
               </div>
-            ))
-          )}
+            </div>
+
+            <div className="swaps-list">
+              {filteredSwaps.length === 0 ? (
+                <div className="empty-state">
+                  <div className="empty-icon">🔍</div>
+                  <p>No loyalty swaps found</p>
+                  <button 
+                    className="create-btn" 
+                    onClick={() => setShowCreateModal(true)}
+                  >
+                    Create First Swap
+                  </button>
+                </div>
+              ) : (
+                filteredSwaps.map((swap, index) => (
+                  <div 
+                    key={swap.id}
+                    className={`swap-item ${selectedSwap?.id === swap.id ? 'selected' : ''}`}
+                    onClick={() => setSelectedSwap(swap)}
+                  >
+                    <div className="swap-header">
+                      <h3>{swap.name}</h3>
+                      <span className={`status-badge ${swap.isVerified ? 'verified' : 'pending'}`}>
+                        {swap.isVerified ? '✅ Verified' : '🔓 Encrypted'}
+                      </span>
+                    </div>
+                    <div className="swap-details">
+                      <div className="detail">
+                        <span>Brand:</span>
+                        <strong>{swap.brand}</strong>
+                      </div>
+                      <div className="detail">
+                        <span>Exchange Rate:</span>
+                        <strong>1:{swap.exchangeRate}</strong>
+                      </div>
+                      <div className="detail">
+                        <span>Points:</span>
+                        <strong>
+                          {swap.isVerified ? 
+                            `${swap.decryptedValue} points` : 
+                            '🔒 FHE Encrypted'
+                          }
+                        </strong>
+                      </div>
+                    </div>
+                    <div className="swap-footer">
+                      <span className="creator">
+                        by {swap.creator.substring(0, 8)}...
+                      </span>
+                      <span className="timestamp">
+                        {new Date(swap.timestamp * 1000).toLocaleDateString()}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="history-panel">
+            <div className="panel-header">
+              <h2>Your Activity History</h2>
+            </div>
+            <div className="history-list">
+              {userHistory.slice(-5).reverse().map((record, index) => (
+                <div key={index} className="history-item">
+                  <div className="history-type">{record.type === 'create' ? '📝 Created' : '🔓 Decrypted'}</div>
+                  <div className="history-details">
+                    {record.type === 'create' ? (
+                      <span>New swap: {record.name}</span>
+                    ) : (
+                      <span>Points: {record.points}</span>
+                    )}
+                  </div>
+                  <div className="history-time">
+                    {new Date(record.timestamp).toLocaleTimeString()}
+                  </div>
+                </div>
+              ))}
+              {userHistory.length === 0 && (
+                <div className="empty-history">
+                  <p>No activity yet</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="info-panel">
+          <h3>How FHE Protects Your Points</h3>
+          <div className="fhe-steps">
+            <div className="step">
+              <div className="step-number">1</div>
+              <div className="step-content">
+                <h4>Encrypt Points</h4>
+                <p>Loyalty points are encrypted using FHE before submission</p>
+              </div>
+            </div>
+            <div className="step">
+              <div className="step-number">2</div>
+              <div className="step-content">
+                <h4>Private Computation</h4>
+                <p>Exchange rates computed on encrypted data without decryption</p>
+              </div>
+            </div>
+            <div className="step">
+              <div className="step-number">3</div>
+              <div className="step-content">
+                <h4>Secure Verification</h4>
+                <p>Only you can decrypt and verify the final point values</p>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -415,28 +585,28 @@ const App: React.FC = () => {
       {selectedSwap && (
         <SwapDetailModal 
           swap={selectedSwap} 
-          onClose={() => setSelectedSwap(null)} 
+          onClose={() => { 
+            setSelectedSwap(null); 
+            setDecryptedPoints(null); 
+          }} 
+          decryptedPoints={decryptedPoints} 
           isDecrypting={isDecrypting || fheIsDecrypting} 
-          decryptData={() => decryptData(selectedSwap.id)}
+          decryptPoints={() => decryptPoints(selectedSwap.id)}
         />
       )}
 
       {transactionStatus.visible && (
-        <div className="transaction-toast">
-          <div className={`toast-content ${transactionStatus.status}`}>
+        <div className={`transaction-toast ${transactionStatus.status}`}>
+          <div className="toast-content">
             <div className="toast-icon">
-              {transactionStatus.status === "pending" && <div className="spinner"></div>}
-              {transactionStatus.status === "success" && "✓"}
-              {transactionStatus.status === "error" && "✗"}
+              {transactionStatus.status === "pending" && "⏳"}
+              {transactionStatus.status === "success" && "✅"}
+              {transactionStatus.status === "error" && "❌"}
             </div>
             <div className="toast-message">{transactionStatus.message}</div>
           </div>
         </div>
       )}
-
-      <footer className="app-footer">
-        <p>Confidential Loyalty Swap · Powered by Zama FHE 🔐</p>
-      </footer>
     </div>
   );
 };
@@ -449,7 +619,7 @@ const CreateSwapModal: React.FC<{
   setSwapData: (data: any) => void;
   isEncrypting: boolean;
 }> = ({ onSubmit, onClose, creating, swapData, setSwapData, isEncrypting }) => {
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
     if (name === 'points') {
       const intValue = value.replace(/[^\d]/g, '');
@@ -469,10 +639,13 @@ const CreateSwapModal: React.FC<{
         
         <div className="modal-body">
           <div className="fhe-notice">
-            <strong>FHE Encryption Notice</strong>
-            <p>Points will be encrypted using Zama FHE technology</p>
+            <div className="notice-icon">🔐</div>
+            <div>
+              <strong>FHE Encrypted Points</strong>
+              <p>Point values are encrypted and never exposed to other brands</p>
+            </div>
           </div>
-
+          
           <div className="form-group">
             <label>Swap Name *</label>
             <input 
@@ -483,50 +656,49 @@ const CreateSwapModal: React.FC<{
               placeholder="Enter swap name..." 
             />
           </div>
-
+          
           <div className="form-group">
-            <label>Points Amount (Integer) *</label>
+            <label>Loyalty Points (Integer) *</label>
             <input 
               type="number" 
               name="points" 
               value={swapData.points} 
               onChange={handleChange} 
-              placeholder="Enter points amount..." 
+              placeholder="Enter points to swap..." 
               min="0"
             />
-            <span className="input-hint">FHE Encrypted</span>
+            <div className="input-hint">FHE Encrypted Integer</div>
           </div>
-
+          
           <div className="form-group">
             <label>Exchange Rate *</label>
             <input 
               type="number" 
-              name="rate" 
-              value={swapData.rate} 
+              name="exchangeRate" 
+              value={swapData.exchangeRate} 
               onChange={handleChange} 
               placeholder="Enter exchange rate..." 
-              min="0"
+              min="1"
             />
-            <span className="input-hint">Public Data</span>
           </div>
-
+          
           <div className="form-group">
-            <label>Description</label>
-            <textarea 
-              name="description" 
-              value={swapData.description} 
+            <label>Brand Name *</label>
+            <input 
+              type="text" 
+              name="brand" 
+              value={swapData.brand} 
               onChange={handleChange} 
-              placeholder="Enter description..." 
-              rows={3}
+              placeholder="Enter your brand..." 
             />
           </div>
         </div>
-
+        
         <div className="modal-footer">
           <button onClick={onClose} className="cancel-btn">Cancel</button>
           <button 
             onClick={onSubmit} 
-            disabled={creating || isEncrypting || !swapData.name || !swapData.points || !swapData.rate}
+            disabled={creating || isEncrypting || !swapData.name || !swapData.points || !swapData.exchangeRate || !swapData.brand} 
             className="submit-btn"
           >
             {creating || isEncrypting ? "Encrypting..." : "Create Swap"}
@@ -538,20 +710,15 @@ const CreateSwapModal: React.FC<{
 };
 
 const SwapDetailModal: React.FC<{
-  swap: SwapData;
+  swap: LoyaltySwapData;
   onClose: () => void;
+  decryptedPoints: number | null;
   isDecrypting: boolean;
-  decryptData: () => Promise<number | null>;
-}> = ({ swap, onClose, isDecrypting, decryptData }) => {
-  const [localDecrypted, setLocalDecrypted] = useState<number | null>(null);
-
+  decryptPoints: () => Promise<number | null>;
+}> = ({ swap, onClose, decryptedPoints, isDecrypting, decryptPoints }) => {
   const handleDecrypt = async () => {
-    if (swap.isVerified) return;
-    
-    const result = await decryptData();
-    if (result !== null) {
-      setLocalDecrypted(result);
-    }
+    if (decryptedPoints !== null) return;
+    await decryptPoints();
   };
 
   return (
@@ -563,67 +730,72 @@ const SwapDetailModal: React.FC<{
         </div>
         
         <div className="modal-body">
-          <div className="detail-section">
-            <h3>{swap.name}</h3>
-            <p className="description">{swap.description}</p>
-          </div>
-
-          <div className="detail-grid">
-            <div className="detail-item">
-              <label>Creator</label>
-              <span>{swap.creator.substring(0, 8)}...{swap.creator.substring(36)}</span>
+          <div className="swap-info-grid">
+            <div className="info-item">
+              <label>Swap Name</label>
+              <div className="info-value">{swap.name}</div>
             </div>
-            <div className="detail-item">
-              <label>Created</label>
-              <span>{new Date(swap.timestamp * 1000).toLocaleString()}</span>
+            <div className="info-item">
+              <label>Brand</label>
+              <div className="info-value">{swap.brand}</div>
             </div>
-            <div className="detail-item">
+            <div className="info-item">
               <label>Exchange Rate</label>
-              <span>{swap.publicRate}</span>
+              <div className="info-value">1:{swap.exchangeRate}</div>
             </div>
-            <div className="detail-item">
-              <label>Status</label>
-              <span className={`status ${swap.isVerified ? 'verified' : 'encrypted'}`}>
-                {swap.isVerified ? 'Verified' : 'Encrypted'}
-              </span>
+            <div className="info-item">
+              <label>Created</label>
+              <div className="info-value">{new Date(swap.timestamp * 1000).toLocaleString()}</div>
             </div>
           </div>
-
-          <div className="encryption-section">
-            <h4>FHE Encryption Status</h4>
-            <div className="encryption-status">
-              <div className="status-item">
-                <span className="label">Points Data:</span>
-                <span className="value">
-                  {swap.isVerified ? 
-                    `${swap.decryptedValue} (Verified)` : 
-                    localDecrypted ? 
-                    `${localDecrypted} (Decrypted)` : 
-                    "🔒 Encrypted"
-                  }
-                </span>
+          
+          <div className="points-section">
+            <h3>Loyalty Points</h3>
+            <div className="points-display">
+              <div className="points-value">
+                {swap.isVerified ? 
+                  `${swap.decryptedValue} points` : 
+                  decryptedPoints !== null ? 
+                  `${decryptedPoints} points` : 
+                  '🔒 Encrypted with FHE'
+                }
               </div>
-              
+              <div className="points-status">
+                Status: {swap.isVerified ? '✅ On-chain Verified' : '🔐 FHE Encrypted'}
+              </div>
+            </div>
+            
+            {!swap.isVerified && (
               <button 
+                className={`decrypt-btn ${decryptedPoints !== null ? 'decrypted' : ''}`}
                 onClick={handleDecrypt}
-                disabled={isDecrypting || swap.isVerified}
-                className={`decrypt-btn ${swap.isVerified ? 'verified' : localDecrypted ? 'decrypted' : ''}`}
+                disabled={isDecrypting}
               >
-                {isDecrypting ? "Decrypting..." : 
-                 swap.isVerified ? "Verified" : 
-                 localDecrypted ? "Decrypted" : "Decrypt Points"}
+                {isDecrypting ? 'Decrypting...' : 
+                 decryptedPoints !== null ? '✅ Decrypted' : '🔓 Decrypt Points'}
               </button>
+            )}
+          </div>
+          
+          <div className="fhe-explanation">
+            <h4>FHE Protection Process</h4>
+            <div className="explanation-steps">
+              <div className="step">
+                <span>1.</span>
+                <p>Points encrypted using Zama FHE before submission</p>
+              </div>
+              <div className="step">
+                <span>2.</span>
+                <p>Encrypted data stored on-chain, accessible for computation</p>
+              </div>
+              <div className="step">
+                <span>3.</span>
+                <p>Only swap creator can decrypt and verify the actual values</p>
+              </div>
             </div>
           </div>
-
-          {swap.isVerified && (
-            <div className="verified-info">
-              <div className="verified-badge">✅ On-chain Verified</div>
-              <p>This swap has been successfully verified on the blockchain using FHE technology.</p>
-            </div>
-          )}
         </div>
-
+        
         <div className="modal-footer">
           <button onClick={onClose} className="close-btn">Close</button>
         </div>
